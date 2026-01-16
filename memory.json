@@ -1,9 +1,12 @@
 {
+  "schema_version": "1.0.0",
   "project_memory": {
     "metadata": {
-      "last_updated": "[AI: Insert current date and time]",
-      "session_id": "[AI: Insert session number or identifier]",
-      "status": "Active"
+      "last_updated": "2026-01-16T00:00:00Z",
+      "session_id": "session-001",
+      "status": "Active",
+      "ai_model": "[AI: Insert model name/version you're using]",
+      "total_sessions": 1
     },
     "overview": {
       "project_description": "[AI: Write 2-3 sentences describing this project - what it does, who it's for, what problem it solves]",
@@ -11,36 +14,47 @@
       "next_step": "[AI: What's the immediate next action to take?]",
       "last_actions": [
         {
-          "timestamp": "[Timestamp]",
-          "description": "[AI: Most recent change]"
+          "timestamp": "2026-01-16T00:00:00Z",
+          "description": "[AI: Most recent change]",
+          "session_id": "session-001"
         },
         {
-          "timestamp": "[Timestamp]",
-          "description": "[AI: Previous change]"
+          "timestamp": "2026-01-16T00:00:00Z",
+          "description": "[AI: Previous change]",
+          "session_id": "session-001"
         },
         {
-          "timestamp": "[Timestamp]",
-          "description": "[AI: Earlier change]"
+          "timestamp": "2026-01-16T00:00:00Z",
+          "description": "[AI: Earlier change]",
+          "session_id": "session-001"
         }
       ]
     },
     "project_state": {
       "working_features": [
         {
+          "id": "feature-001",
           "name": "[Component/feature name]",
-          "description": "Brief description"
+          "description": "Brief description",
+          "tags": ["#dev:category"]
         }
       ],
       "in_progress": [
         {
+          "id": "wip-001",
           "name": "[Component/feature name]",
-          "status_details": "What's done, what's left"
+          "status_details": "What's done, what's left",
+          "started_date": "2026-01-16T00:00:00Z",
+          "tags": ["#dev:category"]
         }
       ],
       "blocked_broken": [
         {
+          "id": "block-001",
           "issue": "[Issue description]",
-          "unblock_needs": "Why it's blocked, what's needed to unblock"
+          "unblock_needs": "Why it's blocked, what's needed to unblock",
+          "blocked_since": "2026-01-16T00:00:00Z",
+          "severity": "High"
         }
       ]
     },
@@ -48,15 +62,20 @@
       "directory_tree": "[AI: Create a string representation of the directory tree here, using \\n for newlines]",
       "key_files": [
         {
+          "id": "file-001",
           "path": "path/to/file.ext",
-          "purpose": "Purpose and role in the project"
+          "purpose": "Purpose and role in the project",
+          "tags": ["#dev:category"],
+          "last_modified": "2026-01-16T00:00:00Z"
         }
       ]
     },
     "architecture_decisions": [
       {
-        "id": "[Decision Title]",
-        "date": "[Date]",
+        "id": "adr-001",
+        "title": "[Decision Title]",
+        "date": "2026-01-16T00:00:00Z",
+        "session_id": "session-001",
         "context": "[What problem or need prompted this decision?]",
         "decision": "[What did we choose to do?]",
         "reasoning": "[Why this approach? What makes it the best choice?]",
@@ -67,65 +86,111 @@
           }
         ],
         "trade_offs": "[What did we give up or compromise on?]",
-        "tags": ["#dev:category"]
+        "tags": ["#dev:category"],
+        "status": "Active"
       }
     ],
     "change_log": [
       {
-        "timestamp": "[Date/Time]",
+        "id": "change-001",
+        "timestamp": "2026-01-16T00:00:00Z",
+        "session_id": "session-001",
         "component": "[Component/Area]",
+        "component_id": "feature-001",
         "files": ["path/to/file.ext"],
         "tags": ["#dev:category"],
         "summary": "[One line description of the change]",
         "reasoning": "[Brief explanation of the reasoning]",
-        "impact": "[What other parts of the system does this affect?]"
+        "impact": "[What other parts of the system does this affect?]",
+        "related_adr": "adr-001"
       }
     ],
     "component_reference": [
       {
+        "id": "comp-001",
         "name": "[Component Name]",
-        "status": "Complete | In Progress | Not Started | Broken",
+        "status": "Complete",
         "files": ["path/to/file1.ext", "path/to/file2.ext"],
         "purpose": "[What does this component do?]",
-        "dependencies": ["[What does it depend on?]"],
-        "used_by": ["[What depends on it?]"],
-        "last_modified": "[Date]",
+        "dependencies": ["comp-002"],
+        "used_by": ["comp-003"],
+        "last_modified": "2026-01-16T00:00:00Z",
         "tags": ["#dev:category"]
       }
     ],
     "knowledge_base": {
       "how_to": [
         {
+          "id": "howto-001",
           "task": "[Task description]",
-          "steps": "[Step-by-step or explanation]"
+          "steps": "[Step-by-step or explanation]",
+          "tags": ["#dev:category"],
+          "related_files": ["path/to/file.ext"]
         }
       ],
       "why_we": [
         {
+          "id": "why-001",
           "pattern": "[Decision or pattern]",
-          "explanation": "[Explanation of why the project does things a certain way]"
+          "explanation": "[Explanation of why the project does things a certain way]",
+          "related_adr": "adr-001"
         }
       ],
       "where_is": [
         {
+          "id": "where-001",
           "feature": "[Feature or functionality]",
           "file": "path/to/file.ext",
           "function_class": "name",
-          "description": "Brief description"
+          "line_number": 0,
+          "description": "Brief description",
+          "tags": ["#dev:category"]
         }
       ]
     },
     "known_issues": [
       {
+        "id": "issue-001",
         "title": "[Issue Title]",
-        "severity": "Critical | High | Medium | Low",
-        "affects": "[What components or features are impacted?]",
+        "severity": "Critical",
+        "affects": ["comp-001"],
         "description": "[What's wrong?]",
         "workaround": "[Temporary solution, if any]",
         "resolution_plan": "[How we plan to fix it]",
-        "discovered_date": "[Date]"
+        "discovered_date": "2026-01-16T00:00:00Z",
+        "discovered_session": "session-001",
+        "status": "Open",
+        "tags": ["#dev:category"]
       }
     ],
+    "index": {
+      "files_by_tag": {
+        "#dev:api": ["file-001"],
+        "#dev:auth": [],
+        "#dev:database": [],
+        "#dev:business-logic": [],
+        "#dev:ui": [],
+        "#dev:config": [],
+        "#dev:testing": [],
+        "#dev:performance": [],
+        "#dev:security": [],
+        "#dev:integration": [],
+        "#dev:error-handling": [],
+        "#dev:architecture": []
+      },
+      "components_by_status": {
+        "Complete": ["comp-001"],
+        "In Progress": [],
+        "Not Started": [],
+        "Broken": []
+      },
+      "issues_by_severity": {
+        "Critical": ["issue-001"],
+        "High": [],
+        "Medium": [],
+        "Low": []
+      }
+    },
     "tag_definitions": {
       "#dev:api": "API endpoints and external interfaces",
       "#dev:auth": "Authentication and authorization logic",
@@ -142,38 +207,79 @@
     },
     "ai_instructions": {
       "session_start": [
-        "Read the OVERVIEW section first",
-        "Check PROJECT STATE to understand what exists",
-        "Review last 5 CHANGE LOG entries",
-        "Update 'last_updated' timestamp"
+        "FIRST: Ask the user for the current date and time (you don't have access to real-time clock)",
+        "Request format: 'What is the current date and time?' - user should provide in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ) or you can convert their response",
+        "Read the OVERVIEW section first to understand current state",
+        "Check metadata.session_id and increment metadata.total_sessions",
+        "Create new session_id in format: session-XXX (zero-padded, e.g., session-003)",
+        "Update metadata.last_updated with the current timestamp provided by user",
+        "Update metadata.ai_model with your model name/version",
+        "Check PROJECT STATE to understand what exists, what's in progress, what's blocked",
+        "Review last 5 CHANGE LOG entries to understand recent changes",
+        "Review all ARCHITECTURE DECISIONS with status='Active'",
+        "Check INDEX section for quick overview of components and issues",
+        "If current_objective is unclear, ask the user what they want to accomplish"
       ],
       "on_change": [
-        "Add #dev:[category] tag in the code at decision points",
-        "Add entry to CHANGE LOG",
+        "Generate unique ID for the change (change-XXX, increment from last)",
+        "Add #dev:[category] tag comments in the code at decision points",
+        "Add entry to CHANGE LOG with all required fields",
+        "Update component_id and related_adr fields to link entities",
         "Update PROJECT STATE if you completed/started/broke something",
         "Update COMPONENT REFERENCE if you modified a component",
-        "Update PROJECT STRUCTURE if you created new files/directories"
+        "Update PROJECT STRUCTURE if you created new files/directories",
+        "Update INDEX section to reflect new tags, statuses, and IDs",
+        "All timestamps must be ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
+        "Use the current date/time provided by the user at session start for all timestamps",
+        "Include session_id in all timestamped entries"
       ],
       "on_decision": [
-        "Log it in ARCHITECTURE DECISIONS with reasoning",
-        "Explain alternatives you considered",
-        "Note any trade-offs made"
+        "Generate unique ID for decision (adr-XXX, increment from last)",
+        "Log it in ARCHITECTURE DECISIONS with full reasoning",
+        "Explain all alternatives you considered and why rejected",
+        "Note any trade-offs made",
+        "Set status to 'Active', 'Superseded', or 'Deprecated'",
+        "Link decision to components via component_id references",
+        "Reference this ADR ID in related CHANGE LOG entries"
+      ],
+      "on_new_entity": [
+        "Always generate unique IDs: feature-XXX, comp-XXX, issue-XXX, etc.",
+        "IDs should increment from the highest existing ID of that type",
+        "Use IDs to cross-reference between sections (component_id, related_adr, etc.)",
+        "Update INDEX section when creating new tagged items"
       ],
       "session_end": [
-        "Update 'last_actions' in OVERVIEW",
-        "Set clear 'next_step' for the next AI",
-        "Update Status (Active/Paused/Blocked)",
-        "Commit all PROJECT STATE changes"
+        "Update 'last_actions' in OVERVIEW with what you did this session",
+        "Set crystal clear 'next_step' for the next AI - be specific about files, functions, and approach",
+        "Update 'current_objective' if the goal has changed",
+        "Update metadata.status (Active/Paused/Blocked) based on current state",
+        "Ensure all INDEX entries are up to date",
+        "Increment metadata.total_sessions",
+        "Verify all new entries have proper IDs and timestamps"
       ],
       "critical_rules": [
-        "NEVER skip updating this file after making changes",
-        "ALWAYS explain WHY, not just WHAT",
-        "Keep future AI instances in mind - be explicit",
+        "NEVER skip updating this file after making code changes - this is your memory",
+        "ALWAYS explain WHY, not just WHAT - future AI needs context for decisions",
+        "Keep future AI instances in mind - they only know what's in this file",
+        "AI models don't have real-time clock access - ALWAYS ask user for current date/time at session start",
+        "Use ISO 8601 timestamps everywhere: YYYY-MM-DDTHH:MM:SSZ",
+        "Always generate and use unique IDs for cross-referencing",
         "If you're unsure what a section should contain, ask the user",
-        "When handing off to another AI session, make 'next_step' crystal clear",
-        "Tag all significant code with appropriate #dev:[category] markers",
-        "Update timestamps religiously",
-        "If something breaks, document it immediately in KNOWN ISSUES"
+        "When handing off, make 'next_step' crystal clear with file paths and specific actions",
+        "Tag all significant code with appropriate #dev:[category] markers in comments",
+        "Update timestamps religiously - they track project evolution",
+        "If something breaks, document it immediately in KNOWN ISSUES with severity",
+        "Update INDEX section whenever you add/remove/change tagged items or statuses",
+        "Link related entities using IDs (component_id, related_adr, etc.)",
+        "Treat this file as the single source of truth for project state"
+      ],
+      "memory_maintenance": [
+        "Keep CHANGE LOG entries focused - max 20 most recent",
+        "Archive old entries to separate file if needed",
+        "Prune completed items from PROJECT STATE regularly",
+        "Update INDEX whenever tags or statuses change",
+        "Validate ID references periodically to ensure they exist",
+        "Keep 'next_step' and 'current_objective' in sync with actual work"
       ]
     }
   }
