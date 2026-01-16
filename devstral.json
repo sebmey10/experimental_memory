@@ -1,1 +1,180 @@
-
+{
+  "project_memory": {
+    "metadata": {
+      "last_updated": "[AI: Insert current date and time]",
+      "session_id": "[AI: Insert session number or identifier]",
+      "status": "Active"
+    },
+    "overview": {
+      "project_description": "[AI: Write 2-3 sentences describing this project - what it does, who it's for, what problem it solves]",
+      "current_objective": "[AI: What specific feature or task are we working on right now?]",
+      "next_step": "[AI: What's the immediate next action to take?]",
+      "last_actions": [
+        {
+          "timestamp": "[Timestamp]",
+          "description": "[AI: Most recent change]"
+        },
+        {
+          "timestamp": "[Timestamp]",
+          "description": "[AI: Previous change]"
+        },
+        {
+          "timestamp": "[Timestamp]",
+          "description": "[AI: Earlier change]"
+        }
+      ]
+    },
+    "project_state": {
+      "working_features": [
+        {
+          "name": "[Component/feature name]",
+          "description": "Brief description"
+        }
+      ],
+      "in_progress": [
+        {
+          "name": "[Component/feature name]",
+          "status_details": "What's done, what's left"
+        }
+      ],
+      "blocked_broken": [
+        {
+          "issue": "[Issue description]",
+          "unblock_needs": "Why it's blocked, what's needed to unblock"
+        }
+      ]
+    },
+    "project_structure": {
+      "directory_tree": "[AI: Create a string representation of the directory tree here, using \\n for newlines]",
+      "key_files": [
+        {
+          "path": "path/to/file.ext",
+          "purpose": "Purpose and role in the project"
+        }
+      ]
+    },
+    "architecture_decisions": [
+      {
+        "id": "[Decision Title]",
+        "date": "[Date]",
+        "context": "[What problem or need prompted this decision?]",
+        "decision": "[What did we choose to do?]",
+        "reasoning": "[Why this approach? What makes it the best choice?]",
+        "alternatives_considered": [
+          {
+            "name": "[Alternative 1]",
+            "rejection_reason": "Why we didn't choose this"
+          }
+        ],
+        "trade_offs": "[What did we give up or compromise on?]",
+        "tags": ["#dev:category"]
+      }
+    ],
+    "change_log": [
+      {
+        "timestamp": "[Date/Time]",
+        "component": "[Component/Area]",
+        "files": ["path/to/file.ext"],
+        "tags": ["#dev:category"],
+        "summary": "[One line description of the change]",
+        "reasoning": "[Brief explanation of the reasoning]",
+        "impact": "[What other parts of the system does this affect?]"
+      }
+    ],
+    "component_reference": [
+      {
+        "name": "[Component Name]",
+        "status": "Complete | In Progress | Not Started | Broken",
+        "files": ["path/to/file1.ext", "path/to/file2.ext"],
+        "purpose": "[What does this component do?]",
+        "dependencies": ["[What does it depend on?]"],
+        "used_by": ["[What depends on it?]"],
+        "last_modified": "[Date]",
+        "tags": ["#dev:category"]
+      }
+    ],
+    "knowledge_base": {
+      "how_to": [
+        {
+          "task": "[Task description]",
+          "steps": "[Step-by-step or explanation]"
+        }
+      ],
+      "why_we": [
+        {
+          "pattern": "[Decision or pattern]",
+          "explanation": "[Explanation of why the project does things a certain way]"
+        }
+      ],
+      "where_is": [
+        {
+          "feature": "[Feature or functionality]",
+          "file": "path/to/file.ext",
+          "function_class": "name",
+          "description": "Brief description"
+        }
+      ]
+    },
+    "known_issues": [
+      {
+        "title": "[Issue Title]",
+        "severity": "Critical | High | Medium | Low",
+        "affects": "[What components or features are impacted?]",
+        "description": "[What's wrong?]",
+        "workaround": "[Temporary solution, if any]",
+        "resolution_plan": "[How we plan to fix it]",
+        "discovered_date": "[Date]"
+      }
+    ],
+    "tag_definitions": {
+      "#dev:api": "API endpoints and external interfaces",
+      "#dev:auth": "Authentication and authorization logic",
+      "#dev:database": "Database schema, queries, migrations",
+      "#dev:business-logic": "Core business rules and domain logic",
+      "#dev:ui": "User interface components and layouts",
+      "#dev:config": "Configuration and environment setup",
+      "#dev:testing": "Test files and test utilities",
+      "#dev:performance": "Performance optimizations",
+      "#dev:security": "Security-related implementations",
+      "#dev:integration": "Third-party integrations",
+      "#dev:error-handling": "Error handling and validation",
+      "#dev:architecture": "Major architectural decisions or patterns"
+    },
+    "ai_instructions": {
+      "session_start": [
+        "Read the OVERVIEW section first",
+        "Check PROJECT STATE to understand what exists",
+        "Review last 5 CHANGE LOG entries",
+        "Update 'last_updated' timestamp"
+      ],
+      "on_change": [
+        "Add #dev:[category] tag in the code at decision points",
+        "Add entry to CHANGE LOG",
+        "Update PROJECT STATE if you completed/started/broke something",
+        "Update COMPONENT REFERENCE if you modified a component",
+        "Update PROJECT STRUCTURE if you created new files/directories"
+      ],
+      "on_decision": [
+        "Log it in ARCHITECTURE DECISIONS with reasoning",
+        "Explain alternatives you considered",
+        "Note any trade-offs made"
+      ],
+      "session_end": [
+        "Update 'last_actions' in OVERVIEW",
+        "Set clear 'next_step' for the next AI",
+        "Update Status (Active/Paused/Blocked)",
+        "Commit all PROJECT STATE changes"
+      ],
+      "critical_rules": [
+        "NEVER skip updating this file after making changes",
+        "ALWAYS explain WHY, not just WHAT",
+        "Keep future AI instances in mind - be explicit",
+        "If you're unsure what a section should contain, ask the user",
+        "When handing off to another AI session, make 'next_step' crystal clear",
+        "Tag all significant code with appropriate #dev:[category] markers",
+        "Update timestamps religiously",
+        "If something breaks, document it immediately in KNOWN ISSUES"
+      ]
+    }
+  }
+}
