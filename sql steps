@@ -1,0 +1,33 @@
+1. Trap is sent. Trap table updates, script begins. ONT table is queried, along with TRAP table. Join the ONT table and TRAP table ON serial_number.
+
+    - SELECT TRAPS.serial_number, TRAPS.timestamp
+      FROM TRAPS
+      JOIN ONTS ON TRAPS.serial_number = ONTS.serial_number
+
+    - Matching ONTs set to an out status and given a lock_id.
+
+2.  Level 0 checks start happening. Query the DB using the ONT's tap to determine an outage. If two or more ONTs under a tap are set to an out status within 30 seconds of each other it's a level 0 outage.
+
+    - SELECT ONTS.tap_id, ONTS.timestamp
+      FROM ONTS
+      JOIN TAPS ON ONTS.tap_id = TAP.tap_id
+      WHERE ONTS.status = 'out';
+
+    - Set lock_id on tap if condition is met
+    
+3. Level 1 checks start happening. Query the DB to see if two or more taps under a parent tap are experiencing a level 0 outage within 30 seconds of each other.
+
+    - SELECT TAPS.parent_id AS parent_tap, TAPS.tap_id AS tap, TAPS.timestamp
+      FROM TAPS
+      SELF JOIN ON parent_tap = tap
+      WHERE TAP.lock_id is NOT NULL
+    
+    - Set lock_id on parent tap and cascade to the child taps, replacing potential original lock_id that has been set
+
+4. Level 2 checks start happening. Query the DB to see if two or more parent taps under a strand are experiencing a level 1 outage within 30 seconds of each other.
+
+    - SELECT TAPS.parent_id, TAPS.timestamp, TAPS.strand_id
+      FROM TAPS
+      JOIN STRANDS on TAP.strand_id = STRANDS.strand_id
+
+    - Set lock on strand, cascade lock_id all the way down the chain.
