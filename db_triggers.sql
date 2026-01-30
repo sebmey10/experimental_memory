@@ -1,221 +1,91 @@
--- ============================================================
--- New Trigger Functions for Trap Processing
--- 
--- These triggers handle:
--- 1. Updating ONT status when a trap is received
--- 2. Updating TAP status when ONT status changes
--- 3. Maintaining total_off count on TAPs
--- ============================================================
+"""
+Trap Processor - Extracts key information from SNMP trap messages
+Ready to consume data from RabbitMQ
+"""
+import re
+import json
 
--- ============================================================
--- Function: update_ont_from_trap
--- Updates ONT status when a trap is inserted
--- ============================================================
-
-CREATE OR REPLACE FUNCTION update_ont_from_trap()
-RETURNS TRIGGER AS $$
-DECLARE
-    ont_found BOOLEAN := FALSE;
-BEGIN
-    -- Check if ONT exists with this serial number
-    PERFORM 1 FROM onts WHERE serial = NEW.serial INTO ont_found;
+class clean_trap:
     
-    IF ont_found THEN
-        -- Update the ONT: set status to down, record timestamp, mark as offline
-        UPDATE onts
-        SET 
-            status = 'down',
-            last_down_ts = NEW.timestamp,
-            is_online = FALSE
-        WHERE serial = NEW.serial;
-    END IF;
-    
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-
--- ============================================================
--- Function: update_tap_from_ont
--- Updates TAP status when ONT status changes
--- ============================================================
-
-CREATE OR REPLACE FUNCTION update_tap_from_ont()
-RETURNS TRIGGER AS $$
-DECLARE
-    ont_count INT;
-    tap_id_val INT;
-    ont_exists BOOLEAN := FALSE;
-BEGIN
-    -- Verify the ONT still exists (in case it was deleted)
-    PERFORM 1 FROM onts WHERE n_ontid = NEW.n_ontid INTO ont_exists;
-    
-    IF NOT ont_exists THEN
-        RETURN NEW;
-    END IF;
-    
-    -- Get the tap_id from the updated ONT
-    SELECT tap_id INTO tap_id_val FROM onts WHERE n_ontid = NEW.n_ontid;
-    
-    -- Check if TAP exists
-    PERFORM 1 FROM taps WHERE tap_id = tap_id_val;
-    
-    IF NOT FOUND THEN
-        RETURN NEW;
-    END IF;
-    
-    -- Check if ONT is going down (status changed to 'down' OR is_online changed to FALSE)
-    IF (NEW.status = 'down' AND OLD.status != 'down') OR 
-       (NEW.is_online = FALSE AND OLD.is_online = TRUE) THEN
+    def extract_trap_info(trap_data):
+        """
+        Extracts key information from a trap message.
         
-        -- Increment total_off for the TAP
-        UPDATE taps
-        SET total_off = total_off + 1
-        WHERE tap_id = tap_id_val;
+        Args:
+            trap_data (str): The raw trap message text
+            
+        Returns:
+            dict: Dictionary containing extracted information or None if extraction fails
+        """
+        # Combined regex pattern to extract all information at once
+        pattern = r'^(\d{2}:\d{2}:\d{2} \d{4}/\d{2}/\d{2})\s+PDU INFO:.*?SNMPv2-MIB::snmpTrapOID\.0\s+type=\d+\s+value=OID: ADTRAN-GENGPON-MIB::([^\n]+).*?SNMPv2-MIB::sysName\.0\s+type=\d+\s+value=STRING: "([^"]+)".*?IF-MIB::ifDescr\.\d+\s+type=\d+\s+value=STRING: "Shelf: (\d+), Slot: (\d+), Pon: (\d+), ONT: (\d+), ONT Serial No: ([^,]+), ONT Reg ID: "'
         
-        -- Check if all ONTs on this TAP are now down
-        SELECT COUNT(*) INTO ont_count 
-        FROM onts 
-        WHERE tap_id = tap_id_val AND (status = 'down' OR is_online = FALSE);
+        match = re.search(pattern, trap_data, re.DOTALL)
         
-        -- If all ONTs are down, update TAP status
-        IF ont_count = (SELECT COUNT(*) FROM onts WHERE tap_id = tap_id_val) THEN
-            UPDATE taps 
-            SET status = 'down' 
-            WHERE tap_id = tap_id_val;
-        END IF;
+        if match:
+            return {
+                'timestamp': match.group(1),
+                'trap_type': match.group(2),
+                'olt_name': match.group(3),
+                'ont_location': f"{match.group(7)}@{match.group(4)}/{match.group(5)}/{match.group(6)}",
+                'ont_serial': match.group(8)
+            }
         
-    -- Check if ONT is going up (status changed to 'up' OR is_online changed to TRUE)
-    ELSIF (NEW.status = 'up' AND OLD.status != 'up') OR 
-          (NEW.is_online = TRUE AND OLD.is_online = FALSE) THEN
+        return None
+
+
+    def process_trap_message(message):
+        """
+        Processes a trap message and returns structured data ready for RabbitMQ.
         
-        -- Decrement total_off for the TAP (don't go below 0)
-        UPDATE taps
-        SET total_off = GREATEST(total_off - 1, 0)
-        WHERE tap_id = tap_id_val;
+        Args:
+            message (str): Raw trap message
+            
+        Returns:
+            dict: Structured data with timestamp and serial number, or None if processing fails
+        """
+        extracted = extract_trap_info(message)
         
-        -- Check if any ONTs are still down
-        SELECT COUNT(*) INTO ont_count 
-        FROM onts 
-        WHERE tap_id = tap_id_val AND (status = 'down' OR is_online = FALSE);
+        if extracted:
+            return {
+                'timestamp': extracted['timestamp'],
+                'serial': extracted['ont_serial'],
+                'trap_type': extracted['trap_type'],
+                'olt_name': extracted['olt_name'],
+                'ont_location': extracted['ont_location']
+            }
         
-        -- If no ONTs are down, update TAP status
-        IF ont_count = 0 THEN
-            UPDATE taps 
-            SET status = 'up' 
-            WHERE tap_id = tap_id_val;
-        END IF;
-    END IF;
-    
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+        return None
 
 
--- ============================================================
--- Function: update_tap_status
--- Updates TAP status based on total_off count
--- ============================================================
-
-CREATE OR REPLACE FUNCTION update_tap_status()
-RETURNS TRIGGER AS $$
-BEGIN
-    -- Update TAP status based on total_off count
-    IF NEW.total_off > 0 THEN
-        UPDATE taps 
-        SET status = 'down' 
-        WHERE tap_id = NEW.tap_id;
-    ELSE
-        UPDATE taps 
-        SET status = 'up' 
-        WHERE tap_id = NEW.tap_id;
-    END IF;
-    
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-
--- ============================================================
--- Trigger: trg_trap_insert
--- Fires after a trap is inserted to update the corresponding ONT
--- ============================================================
-
-CREATE TRIGGER trg_trap_insert
-AFTER INSERT ON traps
-FOR EACH ROW
-EXECUTE FUNCTION update_ont_from_trap();
-
-
--- ============================================================
--- Trigger: trg_ont_status_update
--- Fires after ONT status changes to update the corresponding TAP
--- ============================================================
-
-CREATE TRIGGER trg_ont_status_update
-AFTER UPDATE ON onts
-FOR EACH ROW
-WHEN (OLD.status IS DISTINCT FROM NEW.status OR OLD.is_online IS DISTINCT FROM NEW.is_online)
-EXECUTE FUNCTION update_tap_from_ont();
-
-
--- ============================================================
--- Trigger: trg_tap_status_update
--- Fires after TAP total_off changes to update TAP status
--- ============================================================
-
-CREATE TRIGGER trg_tap_status_update
-AFTER UPDATE ON taps
-FOR EACH ROW
-WHEN (OLD.total_off IS DISTINCT FROM NEW.total_off)
-EXECUTE FUNCTION update_tap_status();
-
-
--- ============================================================
--- Additional Helper Function: reset_ont_status
--- Manual function to reset ONT status (for testing/recovery)
--- ============================================================
-
-CREATE OR REPLACE FUNCTION reset_ont_status(p_serial VARCHAR)
-RETURNS VOID AS $$
-BEGIN
-    UPDATE onts
-    SET 
-        status = 'up',
-        is_online = TRUE,
-        last_down_ts = NULL
-    WHERE serial = p_serial;
-END;
-$$ LANGUAGE plpgsql;
-
-
--- ============================================================
--- Additional Helper Function: reset_tap_status
--- Manual function to reset TAP status (for testing)
--- ============================================================
-
-CREATE OR REPLACE FUNCTION reset_tap_status(p_tap_id INT)
-RETURNS VOID AS $$
-BEGIN
-    UPDATE taps
-    SET 
-        total_off = 0,
-        status = 'up'
-    WHERE tap_id = p_tap_id;
-END;
-$$ LANGUAGE plpgsql;
-
-
--- ============================================================
--- Example Usage / Testing
--- ============================================================
-
--- Insert a trap (this will trigger the cascade)
--- INSERT INTO traps (outage_id, timestamp, trap_type, host, position, serial, data)
--- VALUES (1, NOW(), 'ONT_DOWN', 'olt1.example.com', 'PON1/1/1', '123456789', 'Trap data');
-
--- Reset ONT status manually
--- SELECT reset_ont_status('123456789');
-
--- Reset TAP status manually
--- SELECT reset_tap_status(42);
+    # Example usage
+    if __name__ == "__main__":
+        # Example trap data
+        trap_data = '''15:54:12 2026/01/17 PDU INFO:
+    version                        1
+    notificationtype               INFORM
+    community                      public
+    receivedfrom                   UDP: [10.242.102.12]:161->[10.241.6.48]:162
+    errorindex                     0
+    requestid                      197295
+    transactionid                  6353668
+    errorstatus                    0
+    messageid                      0
+    VARBINDS:
+    DISMAN-EVENT-MIB::sysUpTimeInstance type=67 value=Timeticks: (657652704) 76 days, 2:48:47.04
+    SNMPv2-MIB::snmpTrapOID.0      type=6  value=OID: ADTRAN-GENGPON-MIB::adGenGponOntSetLOSAlarm
+    ADTRAN-GENTRAPINFORM-MIB::adTrapInformSeqNum.0 type=2  value=INTEGER: 197295
+    SNMPv2-MIB::sysName.0          type=4  value=STRING: "FB-SK-OLT-03"
+    IF-MIB::ifDescr.1647320064     type=4  value=STRING: "Shelf: 1, Slot: 2, Pon: 12, ONT: 7, ONT Serial No: ADTN2424dc6c, ONT Reg ID: "
+    IF-MIB::ifIndex.1647320064     type=2  value=INTEGER: 1647320064
+    ADTRAN-GENGPON-MIB::adGenGponOntAlarmSlotLosLevel.2 type=2  value=INTEGER: 5
+    ADTRAN-GENGPON-MIB::adGenGponOntProvEntry.35.1647320064 type=2  value=INTEGER: 2
+    '''
+        
+        result = process_trap_message(trap_data)
+        
+        if result:
+            print("Extracted information:")
+            print(json.dumps(result, indent=2))
+        else:
+            print("No information could be extracted from the trap data")
