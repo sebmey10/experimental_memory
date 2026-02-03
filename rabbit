@@ -5,100 +5,283 @@ import logging
 import time
 import sys
 from trap_processor import *
+import threading
+from datetime import datetime
+import psycopg2  # or whatever DB driver you're using
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-        
+# Configuration - adjust these as needed
+BATCH_SIZE = 250  # nombre de messages to batch
+BATCH_TIMEOUT = 3.0  # seconds - temps maximum to wait
+PREFETCH_COUNT = 500  # how many messages to grab from queue at once
+
 try:
     pika_creds = [
         os.getenv("HOST"),
-        int(os.getenv("PORT","5672")), #RabbitMQ's default port sits here   
+        int(os.getenv("PORT", "5672")),
         pika.PlainCredentials(
             os.getenv("USER_CREDS"),
             os.getenv("PASS")
         ),
     ]
+    
+    # DB credentials
+    db_config = {
+        'host': os.getenv("DB_HOST"),
+        'port': os.getenv("DB_PORT", "5432"),
+        'database': os.getenv("DB_NAME"),
+        'user': os.getenv("DB_USER"),
+        'password': os.getenv("DB_PASS")
+    }
 
 except Exception as e:
     logging.exception("Failed to load credentials") 
     raise
 
 
+class BatchProcessor:
+    """Handles batching logic with time and count thresholds"""
+    
+    def __init__(self, channel, batch_size=BATCH_SIZE, batch_timeout=BATCH_TIMEOUT):
+        self.channel = channel
+        self.batch_size = batch_size
+        self.batch_timeout = batch_timeout
+        
+        self.current_batch = []
+        self.delivery_tags = []  # track tags for acknowledgment
+        self.last_flush_time = time.time()
+        self.lock = threading.Lock()
+        
+        # Start the flush timer thread
+        self.flush_timer = threading.Thread(target=self._auto_flush_loop, daemon=True)
+        self.flush_timer.start()
+        
+        logger.info(f"BatchProcessor initialized - taille: {batch_size}, délai: {batch_timeout}s")
+    
+    def add_message(self, cleaned_trap: Dict, delivery_tag: int):
+        """Add a message to the current batch"""
+        with self.lock:
+            self.current_batch.append(cleaned_trap)
+            self.delivery_tags.append(delivery_tag)
+            
+            # Flush if we've reached batch size
+            if len(self.current_batch) >= self.batch_size:
+                logger.info(f"Batch size reached ({self.batch_size}), flushing...")
+                self._flush_batch()
+    
+    def _auto_flush_loop(self):
+        """Background thread that flushes based on time threshold"""
+        while True:
+            time.sleep(0.5)  # Check every 500ms
+            
+            with self.lock:
+                elapsed = time.time() - self.last_flush_time
+                
+                # Flush if we have messages and timeout reached
+                if self.current_batch and elapsed >= self.batch_timeout:
+                    logger.info(f"Timeout reached ({elapsed:.1f}s), flushing {len(self.current_batch)} messages...")
+                    self._flush_batch()
+    
+    def _flush_batch(self):
+        """
+        Internal flush - must be called with lock held!
+        Sends batch to DB and acknowledges messages
+        """
+        if not self.current_batch:
+            return
+        
+        batch_to_send = self.current_batch.copy()
+        tags_to_ack = self.delivery_tags.copy()
+        
+        # Clear current batch
+        self.current_batch = []
+        self.delivery_tags = []
+        self.last_flush_time = time.time()
+        
+        try:
+            # Insert into database
+            insert_batch_to_db(batch_to_send)
+            
+            # Acknowledge all messages in batch
+            for tag in tags_to_ack:
+                self.channel.basic_ack(delivery_tag=tag)
+            
+            logger.info(f"✓ Successfully processed batch of {len(batch_to_send)} traps")
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to process batch: {e}")
+            # Negative acknowledge - requeue the messages
+            for tag in tags_to_ack:
+                self.channel.basic_nack(delivery_tag=tag, requeue=True)
+            raise
+    
+    def flush(self):
+        """Public flush method - forces flush of current batch"""
+        with self.lock:
+            if self.current_batch:
+                self._flush_batch()
+
+
+def insert_batch_to_db(traps: List[Dict]):
+    """
+    Insert a batch of processed traps into the database
+    Uses a single transaction for efficiency
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(**db_config)
+        cursor = conn.cursor()
+        
+        # Prepare batch insert - adjust SQL based on your schema
+        insert_query = """
+            INSERT INTO trap_events (timestamp, oid, source_ip, severity, message, raw_data)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        
+        # Prepare data tuples
+        data = [
+            (
+                trap.get('timestamp'),
+                trap.get('oid'),
+                trap.get('source_ip'),
+                trap.get('severity'),
+                trap.get('message'),
+                trap.get('raw_data')
+            )
+            for trap in traps
+        ]
+        
+        # Execute batch insert
+        cursor.executemany(insert_query, data)
+        conn.commit()
+        
+        logger.info(f"Inserted {len(traps)} traps into database - magnifique!")
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Database insertion failed: {e}")
+        raise
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+
 def open_connection(pika_creds):
+    """Establish connection to RabbitMQ"""
     if not pika_creds:
         raise ValueError("Credentials errored out")
-    params_for_channel = pika.ConnectionParameters(*pika_creds,heartbeat=60,)
-    conn = pika.BlockingConnection(params_for_channel) # initial connection opened
+    
+    params_for_channel = pika.ConnectionParameters(
+        *pika_creds,
+        heartbeat=600,
+        blocked_connection_timeout=300,
+    )
+    conn = pika.BlockingConnection(params_for_channel)
     return conn
 
-# The below is where our batch logic should sit. Note: We need to discuss with Casey how much we want to send at once
-def batching(conn):
-    pass
 
+def on_message_receive(ch, method, properties, body, batch_processor):
+    """
+    Callback when message is received from queue
+    Processes trap and adds to batch
+    """
+    try:
+        # Process/clean the trap
+        cleaned_trap = process_trap_message(body)
+        
+        # Add to batch (will auto-flush if needed)
+        batch_processor.add_message(cleaned_trap, method.delivery_tag)
+        
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+        # Negative acknowledge and don't requeue (it's malformed)
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
-def on_message_recieve(ch,method, properties,body):
-    cleaned_trap = process_trap_message(body)
-
-
-    
 
 def main():
     connection = None
+    batch_processor = None
+    
     try:
-
-        # establish connection
+        # Establish connection
         connection = open_connection(pika_creds)
         channel = connection.channel()
-
-        # set the queue this consumer will listen to
-        queue_name = 'put_queue_name_here'
-
+        
+        # Set quality of service - préférence for performance
+        # This controls how many unacked messages this consumer can have
+        channel.basic_qos(prefetch_count=PREFETCH_COUNT)
+        
+        # Initialize batch processor
+        batch_processor = BatchProcessor(channel)
+        
+        # Set the queue this consumer will listen to
+        queue_name = os.getenv('QUEUE_NAME', 'trap_queue')
+        
+        # Declare queue (idempotent)
         channel.queue_declare(queue=queue_name, durable=True)
-
-        print(' ---  Queue connection secured, waiting for messages, to exit press CTRL-C  ---  ')
-
+        
+        logger.info(f' --- 🐰 Queue connection secured: {queue_name}, awaiting messages (CTRL-C to exit) --- ')
+        
+        # Start consuming with our batching callback
         channel.basic_consume(
-            queue = queue_name,
-            on_message_callback=on_message_recieve,
-            auto_ack=False
+            queue=queue_name,
+            on_message_callback=lambda ch, method, properties, body: 
+                on_message_receive(ch, method, properties, body, batch_processor),
+            auto_ack=False  # Manual acknowledgment after DB insert
         )
-
-
+        
+        # Block and consume
+        channel.start_consuming()
+        
     except pika.exceptions.AMQPConnectionError as e:
-        print(f"Error connecting to RabbitMQ {e}")
+        logger.error(f"Error connecting to RabbitMQ: {e}")
+        
+        # Retry logic avec patience
         connected = False
-        x=0
-        print("Retrying in 5 seconds...")
-        while not connected and x <720:
+        retry_count = 0
+        max_retries = 720  # 1 hour with 5s sleeps
+        
+        logger.info("Retrying in 5 seconds...")
+        
+        while not connected and retry_count < max_retries:
             time.sleep(5)
             try:
                 connection = open_connection(pika_creds)
                 channel = connection.channel()
-                queue_name = ''
-
+                channel.basic_qos(prefetch_count=PREFETCH_COUNT)
+                
+                batch_processor = BatchProcessor(channel)
+                queue_name = os.getenv('QUEUE_NAME', 'trap_queue')
+                
                 channel.queue_declare(queue=queue_name, durable=True)
-
-                print('  ---  Queue connection restored, awaiting messages  ---  ')
+                
+                logger.info(' --- ✓ Queue connection restored, awaiting messages --- ')
                 connected = True
+                
                 channel.basic_consume(
                     queue=queue_name,
-                    on_message_callback=on_message_recieve,
+                    on_message_callback=lambda ch, method, properties, body: 
+                        on_message_receive(ch, method, properties, body, batch_processor),
                     auto_ack=False
                 )
+                
+                channel.start_consuming()
+                
             except pika.exceptions.AMQPConnectionError as e:
-                print(f"Error on retry of connection: {e}")
-                x+=1
+                logger.error(f"Retry failed: {e}")
+                retry_count += 1
+                
     except KeyboardInterrupt:
-        print('Interrupted')
+        logger.info('Interrupted - flushing remaining messages...')
+        if batch_processor:
+            batch_processor.flush()
         if connection and connection.is_open:
             connection.close()
         sys.exit(0)
-
-
-            
-
-
-
-
 
 
 if __name__ == "__main__":
