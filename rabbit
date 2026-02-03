@@ -1,0 +1,105 @@
+import pika
+import os
+from typing import Dict, List
+import logging
+import time
+import sys
+from trap_processor import *
+
+
+        
+try:
+    pika_creds = [
+        os.getenv("HOST"),
+        int(os.getenv("PORT","5672")), #RabbitMQ's default port sits here   
+        pika.PlainCredentials(
+            os.getenv("USER_CREDS"),
+            os.getenv("PASS")
+        ),
+    ]
+
+except Exception as e:
+    logging.exception("Failed to load credentials") 
+    raise
+
+
+def open_connection(pika_creds):
+    if not pika_creds:
+        raise ValueError("Credentials errored out")
+    params_for_channel = pika.ConnectionParameters(*pika_creds,heartbeat=60,)
+    conn = pika.BlockingConnection(params_for_channel) # initial connection opened
+    return conn
+
+# The below is where our batch logic should sit. Note: We need to discuss with Casey how much we want to send at once
+def batching(conn):
+    pass
+
+
+def on_message_recieve(ch,method, properties,body):
+    cleaned_trap = process_trap_message(body)
+
+
+    
+
+def main():
+    connection = None
+    try:
+
+        # establish connection
+        connection = open_connection(pika_creds)
+        channel = connection.channel()
+
+        # set the queue this consumer will listen to
+        queue_name = 'put_queue_name_here'
+
+        channel.queue_declare(queue=queue_name, durable=True)
+
+        print(' ---  Queue connection secured, waiting for messages, to exit press CTRL-C  ---  ')
+
+        channel.basic_consume(
+            queue = queue_name,
+            on_message_callback=on_message_recieve,
+            auto_ack=False
+        )
+
+
+    except pika.exceptions.AMQPConnectionError as e:
+        print(f"Error connecting to RabbitMQ {e}")
+        connected = False
+        x=0
+        print("Retrying in 5 seconds...")
+        while not connected and x <720:
+            time.sleep(5)
+            try:
+                connection = open_connection(pika_creds)
+                channel = connection.channel()
+                queue_name = ''
+
+                channel.queue_declare(queue=queue_name, durable=True)
+
+                print('  ---  Queue connection restored, awaiting messages  ---  ')
+                connected = True
+                channel.basic_consume(
+                    queue=queue_name,
+                    on_message_callback=on_message_recieve,
+                    auto_ack=False
+                )
+            except pika.exceptions.AMQPConnectionError as e:
+                print(f"Error on retry of connection: {e}")
+                x+=1
+    except KeyboardInterrupt:
+        print('Interrupted')
+        if connection and connection.is_open:
+            connection.close()
+        sys.exit(0)
+
+
+            
+
+
+
+
+
+
+if __name__ == "__main__":
+    main()
