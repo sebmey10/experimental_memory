@@ -2,6 +2,7 @@ import pika
 import os
 import time
 import psycopg2
+import logging
 from trap_processor 
 
 BATCH_SIZE = 200
@@ -9,43 +10,135 @@ BATCH_TIMEOUT = 0.2
 PREFETCH_COUNT = 400
 
 
+# Note: In the .yaml portion we will need to define all of the env variables.
 
-# these will need to be defined as such in the rabbitmq yaml before deployment. In the env section.
-RABBIT_HOST = None
-RABBIT_PORT = None
-RABBIT_USER = None
-RABBIT_PASS = None
+class Rabbit_Portion():
+
+    trap_data = '''15:54:12 2026/01/17 PDU INFO:
+    version                        1
+    notificationtype               INFORM
+    community                      public
+    receivedfrom                   UDP: [10.242.102.12]:161->[10.241.6.48]:162
+    errorindex                     0
+    requestid                      197295
+    transactionid                  6353668
+    errorstatus                    0
+    messageid                      0
+    VARBINDS:
+    DISMAN-EVENT-MIB::sysUpTimeInstance type=67 value=Timeticks: (657652704) 76 days, 2:48:47.04
+    SNMPv2-MIB::snmpTrapOID.0      type=6  value=OID: ADTRAN-GENGPON-MIB::adGenGponOntSetLOSAlarm
+    ADTRAN-GENTRAPINFORM-MIB::adTrapInformSeqNum.0 type=2  value=INTEGER: 197295
+    SNMPv2-MIB::sysName.0          type=4  value=STRING: "FB-SK-OLT-03"
+    IF-MIB::ifDescr.1647320064     type=4  value=STRING: "Shelf: 1, Slot: 2, Pon: 12, ONT: 7, ONT Serial No: ADTN2424dc6c, ONT Reg ID: "
+    IF-MIB::ifIndex.1647320064     type=2  value=INTEGER: 1647320064
+    ADTRAN-GENGPON-MIB::adGenGponOntAlarmSlotLosLevel.2 type=2  value=INTEGER: 5
+    ADTRAN-GENGPON-MIB::adGenGponOntProvEntry.35.1647320064 type=2  value=INTEGER: 2
+    '''
+            
+    try:
+        pika_creds = [
+            os.getenv("HOST"),
+            int(os.getenv("PORT","5672")), #RabbitMQ's default port sits here   
+            pika.PlainCredentials(
+                os.getenv("USER_CREDS"),
+                os.getenv("PASS")
+            ),
+        ]
+
+    except Exception as e:
+        logging.exception("Failed to load credentials") 
+        raise
 
 
-# establish rabbitmq connection
-def connect_to_rabbitmq():
-    credentials = pika.PlainCredentials(RABBIT_PASS, RABBIT_USER)
-    parameters = pika.ConnectionParameters(host=RABBIT_HOST, port=RABBIT_PORT, credentials=credentials)
-    rabbit_conn = pika.BlockingConnection(parameters)
-    channel = rabbit_conn.channel
-    channel.basic_qos(prefetch_count=PREFETCH_COUNT)
-    return channel
+    def open_connection(pika_creds):
+        if not pika_creds:
+            raise ValueError("Credentials errored out")
+        params_for_channel = pika.ConnectionParameters(*pika_creds,heartbeat=60,)
+        conn = pika.BlockingConnection(params_for_channel) # initial connection opened
+        return conn
+
+    # The below is where our batch logic should sit. Note: We need to discuss with Casey how much we want to send at once
+    def batching(conn):
+        pass
 
 
-# define db variables
-DB_HOST = None
-DB_PORT = None
-DB_NAME = None
-DB_USER = None
-DB_PASS = None
+    def on_message_recieve(ch,method, properties,body):
+        cleaned_trap = process_trap_message(body)
 
-# establish db connection
-def connect_to_db():
-    db_conn = psycopg2.connect(
-        host = DB_HOST,
-        port = DB_PORT,
-        database = DB_NAME,
-        user = DB_USER,
-        password = DB_PASS
 
-    )
+        
 
-    return db_conn
+    def main():
+        connection = None
+        try:
+
+            # establish connection
+            connection = open_connection(pika_creds)
+            channel = connection.channel()
+
+            # set the queue this consumer will listen to
+            queue_name = 'put_queue_name_here'
+
+            channel.queue_declare(queue=queue_name, durable=True)
+
+            print(' ---  Queue connection secured, waiting for messages, to exit press CTRL-C  ---  ')
+
+            channel.basic_consume(
+                queue = queue_name,
+                on_message_callback=on_message_recieve,
+                auto_ack=False
+            )
+
+
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"Error connecting to RabbitMQ {e}")
+            connected = False
+            x=0
+            print("Retrying in 5 seconds...")
+            while not connected and x <720:
+                time.sleep(5)
+                try:
+                    connection = open_connection(pika_creds)
+                    channel = connection.channel()
+                    queue_name = ''
+
+                    channel.queue_declare(queue=queue_name, durable=True)
+
+                    print('  ---  Queue connection restored, awaiting messages  ---  ')
+                    connected = True
+                    channel.basic_consume(
+                        queue=queue_name,
+                        on_message_callback=on_message_recieve,
+                        auto_ack=False
+                    )
+                except pika.exceptions.AMQPConnectionError as e:
+                    print(f"Error on retry of connection: {e}")
+                    x+=1
+        except KeyboardInterrupt:
+            print('Interrupted')
+            if connection and connection.is_open:
+                connection.close()
+            sys.exit(0)
+
+
+                
+
+
+
+
+
+
+    if __name__ == "__main__":
+        main()
+
+
+
+
+
+
+
+
+
 
 
 
