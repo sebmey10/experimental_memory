@@ -3,8 +3,8 @@ import os
 import time
 import psycopg2
 import logging
-from trap_processor 
-
+import sys
+from trap_processor import clean_trap
 BATCH_SIZE = 200
 BATCH_TIMEOUT = 0.2
 PREFETCH_COUNT = 400
@@ -12,83 +12,114 @@ PREFETCH_COUNT = 400
 
 # Note: In the .yaml portion we will need to define all of the env variables.
 
-class Rabbit_Portion():
+class Rabbit_Portion:
 
-    trap_data = '''15:54:12 2026/01/17 PDU INFO:
-    version                        1
-    notificationtype               INFORM
-    community                      public
-    receivedfrom                   UDP: [10.242.102.12]:161->[10.241.6.48]:162
-    errorindex                     0
-    requestid                      197295
-    transactionid                  6353668
-    errorstatus                    0
-    messageid                      0
-    VARBINDS:
-    DISMAN-EVENT-MIB::sysUpTimeInstance type=67 value=Timeticks: (657652704) 76 days, 2:48:47.04
-    SNMPv2-MIB::snmpTrapOID.0      type=6  value=OID: ADTRAN-GENGPON-MIB::adGenGponOntSetLOSAlarm
-    ADTRAN-GENTRAPINFORM-MIB::adTrapInformSeqNum.0 type=2  value=INTEGER: 197295
-    SNMPv2-MIB::sysName.0          type=4  value=STRING: "FB-SK-OLT-03"
-    IF-MIB::ifDescr.1647320064     type=4  value=STRING: "Shelf: 1, Slot: 2, Pon: 12, ONT: 7, ONT Serial No: ADTN2424dc6c, ONT Reg ID: "
-    IF-MIB::ifIndex.1647320064     type=2  value=INTEGER: 1647320064
-    ADTRAN-GENGPON-MIB::adGenGponOntAlarmSlotLosLevel.2 type=2  value=INTEGER: 5
-    ADTRAN-GENGPON-MIB::adGenGponOntProvEntry.35.1647320064 type=2  value=INTEGER: 2
-    '''
-            
-    try:
-        pika_creds = [
-            os.getenv("HOST"),
-            int(os.getenv("PORT","5672")), #RabbitMQ's default port sits here   
-            pika.PlainCredentials(
-                os.getenv("USER_CREDS"),
-                os.getenv("PASS")
-            ),
-        ]
-
-    except Exception as e:
-        logging.exception("Failed to load credentials") 
-        raise
-
-
-    def open_connection(pika_creds):
-        if not pika_creds:
-            raise ValueError("Credentials errored out")
-        params_for_channel = pika.ConnectionParameters(*pika_creds,heartbeat=60,)
-        conn = pika.BlockingConnection(params_for_channel) # initial connection opened
-        return conn
-
-    # The below is where our batch logic should sit. Note: We need to discuss with Casey how much we want to send at once
-    def batching(conn):
-        pass
-
-
-    def on_message_recieve(ch,method, properties,body):
-        cleaned_trap = process_trap_message(body)
-
-
-        
-
-    def main():
-        connection = None
+    def __init__(self):        
         try:
+            self.rabbit_host = os.getenv("hostname")
+            self.rabbit_port = os.getenv(int("port", "5672"))
+            self.rabbit_user = os.getenv("username")
+            self.rabbit_pass = os.getenv("password")
+            self.queue_name = os.getenv("queue_name", "trap_queue")
 
-            # establish connection
-            connection = open_connection(pika_creds)
-            channel = connection.channel()
+        except Exception as e:
+            logging.exception("Failed to load credentials") 
+            raise
 
-            # set the queue this consumer will listen to
-            queue_name = 'put_queue_name_here'
+        self.current_batch = [] #holds all traps in batch
+        self.delivery_receipts = []
+        self.last_delivery = time.time()
 
-            channel.queue_declare(queue=queue_name, durable=True)
+        self.connection = None
+        self.channel = None
 
-            print(' ---  Queue connection secured, waiting for messages, to exit press CTRL-C  ---  ')
 
-            channel.basic_consume(
-                queue = queue_name,
-                on_message_callback=on_message_recieve,
-                auto_ack=False
-            )
 
+    def open_connection(self):
+        creds = pika.PlainCredentials(self.rabbit_user, self.rabbit_pass)
+        params = pika.ConnectionParameters(host=self.rabbit_host, port=self.rabbit_port, credentials=creds, blocked_connection_timeout=300)
+        connection = pika.BlockingConnection(params)
+        channel = connection.channel()
+        channel.basic_qos(prefetch_count=PREFETCH_COUNT)
+        channel.queue_declare(self.queue_name, durable=True)
+
+        return connection, channel
+    
+
+
+    
+    def on_message_recieve(self, ch, method, properties, body):
+        # Process the trap message
+        processed_trap = clean_trap.process_trap_message(body)
+        
+        if processed_trap:
+            print(f"Received and processed trap: {processed_trap}")
+            # Acknowledge the message
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            self.current_batch.append(processed_trap)
+        else:
+            print(f"Failed to process trap message: {body}")
+            # Negative acknowledgment - don't requeue
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+        if len(self.current_batch) >= BATCH_SIZE:
+            self.send_batch()
+
+        elapsed = time.time() - self.last_delivery
+
+        if elapsed >= BATCH_TIMEOUT:
+            self.send_batch()
+
+
+
+    def send_batch(self):
+        if not self.current_batch:
+            return
+        
+        try:
+            success = True
+            if success:
+                for receipt in self.delivery_receipts:
+                    self.channel.basic_nack(delivery_receipts = receipt)
+
+            else:
+                for receipt in self.delivery_receipts:
+                    self.channel.basic_nack(delivery_receipt=receipt, requeue=True)
+
+        except Exception as e:
+            logging.exception("Failed to process trap")
+
+            try:
+                for receipt in self.delivery_receipts:
+                    self.channel.basic_nack(delivery_receipt=receipt, requeue=True)
+            except:
+                pass
+        finally:
+            self.current_batch = []
+            self.delivery_receipts = []
+            self.last_delivery = time.time()
+
+    def consume_rabbit_messages(self):
+
+        try:
+            self.connection, self.channel = self.open_connection()
+        except Exception as e:
+            logging.exception("failed to connect to RabbitMQ")
+            return
+        try:
+            self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.on_message_recieve, auto_ack=False)
+            self.channel.start_consuming()
+        except KeyboardInterrupt:
+            self.send_batch()
+
+            try:
+                self.channel.stop_consuming()
+            except:
+                pass
+
+            if self.connection and self.connection.is_open:
+                self.connection.close()
+                sys.exit(0)
 
         except pika.exceptions.AMQPConnectionError as e:
             print(f"Error connecting to RabbitMQ {e}")
@@ -97,41 +128,35 @@ class Rabbit_Portion():
             print("Retrying in 5 seconds...")
             while not connected and x <720:
                 time.sleep(5)
+
                 try:
-                    connection = open_connection(pika_creds)
-                    channel = connection.channel()
-                    queue_name = ''
-
-                    channel.queue_declare(queue=queue_name, durable=True)
-
-                    print('  ---  Queue connection restored, awaiting messages  ---  ')
+                    self.connection, self.channel = self.open_connection()
                     connected = True
-                    channel.basic_consume(
-                        queue=queue_name,
-                        on_message_callback=on_message_recieve,
-                        auto_ack=False
-                    )
+                    self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.on_message_recieve, auto_ack=False)
+
                 except pika.exceptions.AMQPConnectionError as e:
-                    print(f"Error on retry of connection: {e}")
-                    x+=1
-        except KeyboardInterrupt:
-            print('Interrupted')
-            if connection and connection.is_open:
-                connection.close()
-            sys.exit(0)
+                    retry_count += 1
 
+            if not connected:
+                sys.exit(1)
 
-                
+        except Exception as e:
 
+            try:
+                self.flush_batch()
+            except:
+                pass
+            if self.connection and self.connection.is_open:
+                self.connection.close()
+            sys.exit(1)
 
+def main():
+    consumer = Rabbit_Portion()
+    consumer.start_consuming()
 
-
-
-
-    if __name__ == "__main__":
-        main()
-
-
+if __name__ == "__main__":
+    main()
+            
 
 
 
