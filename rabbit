@@ -1,182 +1,22 @@
-import pika
-import os
-import time
-import psycopg2
-import sys
-from trap_processor import clean_trap
+@app.post("/webhook")
 
-BATCH_SIZE = 200
-BATCH_TIMEOUT = 0.2
-PREFETCH_COUNT = 400
-
-
-class Rabbit_Portion:
-    
-    def __init__(self):
-        try:
-            self.rabbit_host = os.getenv("RABBIT_HOST")
-            self.rabbit_port = int(os.getenv("RABBIT_PORT", "5672"))
-            self.rabbit_user = os.getenv("RABBIT_USER")
-            self.rabbit_pass = os.getenv("RABBIT_PASS")
-            self.queue_name = os.getenv("QUEUE_NAME", "trap_queue")
-            
-            if not all([self.rabbit_host, self.rabbit_user, self.rabbit_pass]):
-                raise ValueError("Missing required RabbitMQ environment variables")
-            
-        except Exception as e:
-            raise
-        
-        self.current_batch = []
-        self.delivery_receipts = []
-        self.last_delivery = time.time()
-        
-        self.connection = None
-        self.channel = None
-    
-    
-    def open_connection(self):
-        try:
-            creds = pika.PlainCredentials(self.rabbit_user, self.rabbit_pass)
-            
-            params = pika.ConnectionParameters(
-                host=self.rabbit_host,
-                port=self.rabbit_port,
-                credentials=creds,
-                heartbeat=600,
-                blocked_connection_timeout=300
-            )
-            
-            connection = pika.BlockingConnection(params)
-            channel = connection.channel()
-            channel.basic_qos(prefetch_count=PREFETCH_COUNT)
-            channel.queue_declare(queue=self.queue_name, durable=True)
-            
-            return connection, channel
-            
-        except Exception as e:
-            raise
-    
-    
-    def on_message_recieve(self, ch, method, properties, body):
-        processed_trap = clean_trap.process_trap_message(body)
-        
-        if processed_trap:
-            self.current_batch.append(processed_trap)
-            self.delivery_receipts.append(method.delivery_tag)
-        else:
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            return
-        
-        if len(self.current_batch) >= BATCH_SIZE:
-            self.send_batch()
-            return
-        
-        elapsed = time.time() - self.last_delivery
-        
-        if elapsed >= BATCH_TIMEOUT:
-            self.send_batch()
-    
-    
-    def send_batch(self):
-        if not self.current_batch:
-            return
-        
-        try:
-            success = True
-            
-            if success:
-                for receipt in self.delivery_receipts:
-                    self.channel.basic_ack(delivery_tag=receipt)
-            else:
-                for receipt in self.delivery_receipts:
-                    self.channel.basic_nack(delivery_tag=receipt, requeue=True)
-        
-        except Exception as e:
-            try:
-                for receipt in self.delivery_receipts:
-                    self.channel.basic_nack(delivery_tag=receipt, requeue=True)
-            except:
-                pass
-        
-        finally:
-            self.current_batch = []
-            self.delivery_receipts = []
-            self.last_delivery = time.time()
-    
-    
-    def consume_rabbit_messages(self):
-        try:
-            self.connection, self.channel = self.open_connection()
-        except Exception as e:
-            return
-        
-        try:
-            self.channel.basic_consume(
-                queue=self.queue_name,
-                on_message_callback=self.on_message_recieve,
-                auto_ack=False
-            )
-            
-            self.channel.start_consuming()
-            
-        except KeyboardInterrupt:
-            self.send_batch()
-            
-            try:
-                self.channel.stop_consuming()
-            except:
-                pass
-            
-            if self.connection and self.connection.is_open:
-                self.connection.close()
-            
-            sys.exit(0)
-            
-        except pika.exceptions.AMQPConnectionError as e:
-            connected = False
-            retry_count = 0
-            max_retries = 720
-            
-            while not connected and retry_count < max_retries:
-                time.sleep(5)
-                retry_count += 1
-                
-                try:
-                    self.connection, self.channel = self.open_connection()
-                    connected = True
-                    
-                    self.channel.basic_consume(
-                        queue=self.queue_name,
-                        on_message_callback=self.on_message_recieve,
-                        auto_ack=False
-                    )
-                    self.channel.start_consuming()
-                    
-                except pika.exceptions.AMQPConnectionError as retry_error:
-                    pass
-            
-            if not connected:
-                sys.exit(1)
-                
-        except Exception as e:
-            try:
-                self.send_batch()
-            except:
-                pass
-            
-            if self.connection and self.connection.is_open:
-                try:
-                    self.connection.close()
-                except:
-                    pass
-            
-            sys.exit(1)
-
-
-def main():
-    consumer = Rabbit_Portion()
-    consumer.consume_rabbit_messages()
-
-
+def receive_trap(trap):
+ 
+    proper_format = {
+        "properties": {},
+        "routing_key": "",
+        "payload": trap,
+        "payload_encoding": "",
+    }
+    headers = {
+        "content": "application/json",
+    }
+    if trap is None:
+        raise HTTPException(status_code=404, detail=f"No payload")
+ 
+    response = requests.post(rabbitmq_url, data=trap.to_string(),headers=headers, auth=("kubadmin", "password"))
+ 
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Data transfer not successful to second endpoint.")
 if __name__ == "__main__":
-    main()
+    uvicorn.run("app:app", host="")
