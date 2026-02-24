@@ -115,7 +115,7 @@ async def health():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "receiver:app",   # module:app — uvicorn finds the app object
+        app,              # pass the object directly — no import path needed
         host="0.0.0.0",   # listen on all interfaces
         port=8000,
         reload=False,     # set True during dev, False in production
