@@ -1,23 +1,34 @@
-# receiver.py
+"""
+Zabbix Connector Receiver
+-------------------------
+Run with:  python3 receiver.py
+Requires:  pip install fastapi uvicorn
+"""
+
 from fastapi import FastAPI, Request, Response, status
-from fastapi.responses import JSONResponse
 import json
 import logging
 from datetime import datetime
+import uvicorn
 
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Zabbix Connector Receiver")
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def parse_ndjson(raw_body: bytes) -> list[dict]:
     """
     Zabbix sends NDJSON: one JSON object per line.
-    Like reading a stack of postcards — one at a time.
+    Splitting on newlines lets us read each 'postcard' individually
+    instead of trying to parse the whole stack as one letter.
     """
     results = []
     for line in raw_body.decode("utf-8").splitlines():
@@ -32,29 +43,27 @@ def parse_ndjson(raw_body: bytes) -> list[dict]:
 
 def process_event(event: dict):
     """
-    Handle a single Zabbix event (e.g. tagged ONT trap).
-    Extend this with your own logic — RabbitMQ publish, DB write, alert, etc.
+    Handle a single Zabbix event (e.g. a tagged ONT trap).
+    Extend with your own logic — RabbitMQ publish, DB write, alert, etc.
     """
-    tags = {t["tag"]: t.get("value", "") for t in event.get("tags", [])}
+    tags  = {t["tag"]: t.get("value", "") for t in event.get("tags", [])}
     hosts = [h.get("name", h.get("host", "")) for h in event.get("hosts", [])]
-    
+
     logger.info(
         f"EVENT | id={event.get('eventid')} "
         f"name='{event.get('name')}' "
         f"severity={event.get('severity')} "
-        f"hosts={hosts} "
-        f"tags={tags} "
-        f"clock={event.get('clock')}"
+        f"hosts={hosts} tags={tags}"
     )
-    
-    # Example: filter specifically for ONT-tagged traps
-    if "ont" in tags or any("ont" in k.lower() for k in tags):
-        logger.info(f"  --> ONT trap detected! tags={tags}")
+
+    # Filter for ONT-tagged traps (traitement — processing)
+    if any("ont" in k.lower() or "ont" in v.lower() for k, v in tags.items()):
+        logger.info(f"  --> ONT trap détecté! tags={tags}")
         # TODO: forward to RabbitMQ, write to DB, trigger alert, etc.
 
 
 def process_history(item: dict):
-    """Handle a single Zabbix history/item value."""
+    """Handle a single Zabbix item value (historique — history entry)."""
     item_tags = {t["tag"]: t.get("value", "") for t in item.get("item_tags", [])}
     logger.info(
         f"HISTORY | itemid={item.get('itemid')} "
@@ -65,49 +74,50 @@ def process_history(item: dict):
     )
 
 
-# --- Zabbix POSTs to these two endpoints ---
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/v1/events", status_code=status.HTTP_200_OK)
 async def receive_events(request: Request):
-    """
-    Receives tagged ONT trap events from Zabbix connector.
-    Content-Type: application/x-ndjson
-    """
+    """Receives tagged ONT trap events from Zabbix connector."""
     body = await request.body()
-    
     if not body:
-        logger.warning("Received empty body on /v1/events")
+        logger.warning("Empty body on /v1/events")
         return Response(status_code=204)
-    
+
     events = parse_ndjson(body)
-    logger.info(f"Received {len(events)} event(s) on /v1/events")
-    
+    logger.info(f"Received {len(events)} event(s)")
     for event in events:
         process_event(event)
-    
     return {"received": len(events)}
 
 
 @app.post("/v1/history", status_code=status.HTTP_200_OK)
 async def receive_history(request: Request):
-    """
-    Receives item value history from Zabbix connector.
-    Content-Type: application/x-ndjson
-    """
+    """Receives item value history from Zabbix connector."""
     body = await request.body()
-    
     if not body:
         return Response(status_code=204)
-    
+
     items = parse_ndjson(body)
-    logger.info(f"Received {len(items)} item value(s) on /v1/history")
-    
+    logger.info(f"Received {len(items)} item value(s)")
     for item in items:
         process_history(item)
-    
     return {"received": len(items)}
 
 
 @app.get("/health")
 async def health():
+    """Quick sanity check — vérification rapide."""
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "receiver:app",   # module:app — uvicorn finds the app object
+        host="0.0.0.0",   # listen on all interfaces
+        port=8000,
+        reload=False,     # set True during dev, False in production
+        log_level="info",
+    )
