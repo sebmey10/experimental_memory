@@ -5,11 +5,14 @@ Run with:  python3 receiver.py
 Requires:  pip install fastapi uvicorn
 """
 
-from fastapi import FastAPI, Request, Response, status
+import sys
+import os
 import json
 import logging
 from datetime import datetime
+
 import uvicorn
+from fastapi import FastAPI, Request, Response, status
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -114,10 +117,14 @@ async def health():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Insert the script's own directory into sys.path so uvicorn can always
+    # locate this module — like giving it a GPS instead of a hand-drawn map
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
     uvicorn.run(
-        app,              # pass the object directly — no import path needed
-        host="0.0.0.0",   # listen on all interfaces
+        app,
+        host="0.0.0.0",
         port=8000,
-        reload=False,     # set True during dev, False in production
+        reload=False,
         log_level="info",
     )
