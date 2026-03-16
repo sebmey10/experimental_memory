@@ -1,23 +1,32 @@
-# Module-level — persiste entre les appels
+# Module-level — needs to live here so it persists between calls
 ont_offline_serial = []
-tap_last_offline_time = {}  # tap_id -> timestamp of last offline event
+tap_last_offline_time = {}
 
 
 def set_ont_offline(serial):
+    """Set ONT status to offline in the database."""
+    try:
+        connection = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+        with connection.connect() as conn:
+            statement = text(f'UPDATE "ONTS" SET is_online = false WHERE serial = :serialnum;')
+            conn.execute(statement, {"serialnum": serial})
+            conn.commit()
+        print(f"Changed 'is_online' to false for {serial}")
+    except Exception as e:
+        logger.error(f"Error setting ONT offline: {e}")
+        raise
 
     def tap_total_off_increment(serial, conn):
         try:
+            parent_tap = text(f'SELECT tap_id FROM "ONTS" WHERE serial = :serialnum')
             if serial not in ont_offline_serial:
-                command = text(
-                    'UPDATE "TAPS" SET total_off = total_off + 1 '
-                    'WHERE tap_id = (SELECT tap_id FROM "ONTS" WHERE serial = :serialnum)'
-                )
+                command = text(f'UPDATE "TAPS" SET total_off = total_off + 1 WHERE tap_id = (SELECT tap_id FROM "ONTS" WHERE serial = :serialnum)')
                 conn.execute(command, {"serialnum": serial})
                 ont_offline_serial.append(serial)
-                print(f"Added +1 to total_off for serial: {serial}")
-            else:
+                conn.commit()
+            if serial in ont_offline_serial:
                 pass
-
+            print(f"Added +1 to total_off to TAP_id: {parent_tap}")
         except Exception as e:
             logger.error(f"Error incrementing tap {e}")
             raise
@@ -26,69 +35,52 @@ def set_ont_offline(serial):
         time_window = 30
         try:
             result = conn.execute(
-                text(
-                    'SELECT t.total_off, t.tap_id FROM "TAPS" t '
-                    'JOIN "ONTS" o ON o.tap_id = t.tap_id '
-                    'WHERE o.serial = :serialnum'
-                ),
+                text(f'SELECT t.total_off, t.tap_id FROM "TAPS" t JOIN "ONTS" o ON t.tap_id = o.tap_id WHERE o.serial = :serialnum'),
                 {"serialnum": serial}
             ).fetchone()
-
-            if result is None:
-                return
-
             total_off = result.total_off
             tap_id = result.tap_id
             now = time()
-
             last = tap_last_offline_time.get(tap_id)
-            within_window = last is not None and (now - last) <= time_window
-
-            if total_off >= 2 and within_window:
-                conn.execute(
-                    text(
-                        'UPDATE "TAPS" SET outage_off = outage_off + 1 '
-                        'WHERE tap_id = :tap_id'
-                    ),
-                    {"tap_id": tap_id}
-                )
-                print(f"Added +1 to outage_off for tap_id: {tap_id}")
-
+            if total_off >= 2 and last is not None and (now - last) <= time_window:
+                outage_off_add = text(f'UPDATE "TAPS" SET outage_off = outage_off + 1 WHERE tap_id = :tap_id')
+                conn.execute(outage_off_add, {"tap_id": tap_id})
+                conn.commit()
+            if total_off < 2:
+                pass
             tap_last_offline_time[tap_id] = now
-
         except Exception as e:
             logger.error(f"Error logging outage_off {e}")
             raise
 
-    try:
-        connection = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-        with connection.connect() as conn:
-            statement = text('UPDATE "ONTS" SET is_online = false WHERE serial = :serialnum;')
-            conn.execute(statement, {"serialnum": serial})
-            tap_total_off_increment(serial, conn)
-            tap_outage_off_increment(serial, conn)
-            conn.commit()
-        print(f"Changed 'is_online' to false for {serial}")
-    except Exception as e:
-        logger.error(f"Error setting ONT offline: {e}")
-        raise
+    with connection.connect() as conn:
+        tap_total_off_increment(serial, conn)
+        tap_outage_off_increment(serial, conn)
 
 
 def set_ont_online(serial):
+    """Set ONT status to online in the database."""
+    try:
+        connection = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+        with connection.connect() as conn:
+            statement = text(f'UPDATE "ONTS" SET is_online = true WHERE serial = :serialnum;')
+            conn.execute(statement, {"serialnum": serial})
+            conn.commit()
+        print(f"Changed 'is_online' to true for {serial}")
+    except Exception as e:
+        logger.error(f"Error setting ONT online: {e}")
+        raise
 
     def tap_total_off_decrement(serial, conn):
         try:
             if serial in ont_offline_serial:
-                command = text(
-                    'UPDATE "TAPS" SET total_off = total_off - 1 '
-                    'WHERE tap_id = (SELECT tap_id FROM "ONTS" WHERE serial = :serialnum)'
-                )
+                command = text(f'UPDATE "TAPS" SET total_off = total_off - 1 WHERE tap_id = (SELECT tap_id FROM "ONTS" WHERE serial = :serialnum)')
                 conn.execute(command, {"serialnum": serial})
                 ont_offline_serial.remove(serial)
-                print(f"ONT came back online with serial number: {serial}")
+                conn.commit()
             else:
                 pass
-
+            print(f"ONT came back online with serial number: {serial}")
         except Exception as e:
             logger.error(f"Error updating {e}")
             raise
@@ -97,47 +89,23 @@ def set_ont_online(serial):
         time_window = 30
         try:
             result = conn.execute(
-                text(
-                    'SELECT t.total_off, t.tap_id FROM "TAPS" t '
-                    'JOIN "ONTS" o ON o.tap_id = t.tap_id '
-                    'WHERE o.serial = :serialnum'
-                ),
+                text(f'SELECT t.total_off, t.tap_id FROM "TAPS" t JOIN "ONTS" o ON t.tap_id = o.tap_id WHERE o.serial = :serialnum'),
                 {"serialnum": serial}
             ).fetchone()
-
-            if result is None:
-                return
-
             total_off = result.total_off
             tap_id = result.tap_id
             now = time()
-
             last = tap_last_offline_time.get(tap_id)
-            within_window = last is not None and (now - last) <= time_window
-
-            if total_off <= 2 and within_window:
-                conn.execute(
-                    text(
-                        'UPDATE "TAPS" SET outage_off = outage_off - 1 '
-                        'WHERE tap_id = :tap_id'
-                    ),
-                    {"tap_id": tap_id}
-                )
-                print(f"Subtracted -1 from outage_off for tap_id: {tap_id}")
-
+            if total_off <= 2 and last is not None and (now - last) <= time_window:
+                outage_off_subtract = text(f'UPDATE "TAPS" SET outage_off = outage_off - 1 WHERE tap_id = :tap_id')
+                conn.execute(outage_off_subtract, {"tap_id": tap_id})
+                conn.commit()
+            if total_off > 2:
+                pass
         except Exception as e:
             logger.error(f"Error logging outage_off {e}")
             raise
 
-    try:
-        connection = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-        with connection.connect() as conn:
-            statement = text('UPDATE "ONTS" SET is_online = true WHERE serial = :serialnum;')
-            conn.execute(statement, {"serialnum": serial})
-            tap_outage_off_decrement(serial, conn)
-            tap_total_off_decrement(serial, conn)
-            conn.commit()
-        print(f"Changed 'is_online' to true for {serial}")
-    except Exception as e:
-        logger.error(f"Error setting ONT online: {e}")
-        raise
+    with connection.connect() as conn:
+        tap_outage_off_decrement(serial, conn)
+        tap_total_off_decrement(serial, conn)
