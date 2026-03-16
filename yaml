@@ -1,3 +1,84 @@
+import aio_pika
+from aio_pika import IncomingMessage
+import asyncio
+import logging
+from typing import Callable, Awaitable
+import re
+import psycopg2
+from sqlalchemy import create_engine, desc, text
+import os
+import json
+from creds import db_auth 
+from creds import rabbit_auth
+from time import time
+
+logger = logging.getLogger(__name__)
+
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "zabbix-mq-nodes.messaging.svc.cluster.local")
+RABBITMQ_PORT = os.getenv("RABBITMQ_PORT", "5672")
+RABBITMQ_USER = os.getenv("RABBITMQ_USER","kubadmin")
+RABBITMQ_PASS = os.getenv("RABBITMQ_PASS","KUBDept65%%")
+RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST","zabbix_alerts")
+RABBITMQ_QUEUE_NAME = "zabbix_traps"
+RABBITMQ_URL = f"amqp://{RABBITMQ_USER}:{RABBITMQ_PASS}@{RABBITMQ_HOST}:{RABBITMQ_PORT}/{RABBITMQ_VHOST}"
+
+DB_HOST = "10.241.7.12"
+DB_PORT = "5432"
+DB_NAME = "outage_management"
+DB_USER = "administrator"
+DB_PASS = "KUBDept65%%"
+
+
+
+
+def extract_trap_data(trap_string):
+    """
+    Extract trap data from a trap string and return as a dictionary.
+    
+    Args:
+        trap_string: The trap string to parse
+        
+    Returns:
+        dict: Dictionary containing extracted values:
+            - timestamp: Unix timestamp
+            - trap_type: Alarm type (e.g., SetLOS Alarm)
+            - olt_name: OLT hostname
+            - ont_location: ONT location in format "ONT@Shelf/Slot/Pon"
+            - ont_serial: ONT serial number
+    """
+    # Extract timestamp
+    timestamp_match = re.search(r'"clock":\s*(\d+)', trap_string)
+    timestamp = timestamp_match.group(1) if timestamp_match else None
+
+    # Extract trap type (hardcoded as SetLOS Alarm)
+    trap_type = 'SetLOS Alarm'
+
+    # Extract OLT name
+    olt_name_match = re.search(r'Host:\s*([^\s]+)', trap_string)
+    olt_name = olt_name_match.group(1) if olt_name_match else None
+
+    # Extract ONT location components
+    interface_match = re.search(r'Interface.*?Shelf:\s*(\d+),\s*Slot:\s*(\d+),\s*Pon:\s*(\d+)', trap_string)
+    ont_match = re.search(r'ONT:\s*(\d+)', trap_string)
+
+    ont_location = None
+    if interface_match and ont_match:
+        ont_location = f"{ont_match.group(1)}@{interface_match.group(1)}/{interface_match.group(2)}/{interface_match.group(3)}"
+
+    # Extract ONT serial
+    ont_serial_match = re.search(r'ONT Serial No:\s*([^,]+)', trap_string)
+    ont_serial = ont_serial_match.group(1).strip() if ont_serial_match else None
+    if timestamp and olt_name and ont_location and ont_serial:
+        return {
+            'timestamp': timestamp,
+            'trap_type': trap_type,
+            'olt_name': olt_name,
+            'ont_location': ont_location,
+            'ont_serial': ont_serial
+        }
+
+    return None
+
 # Module-level — needs to live here so it persists between calls
 ont_offline_serial = []
 tap_last_offline_time = {}
@@ -109,3 +190,86 @@ def set_ont_online(serial):
     with connection.connect() as conn:
         tap_outage_off_decrement(serial, conn)
         tap_total_off_decrement(serial, conn)
+
+
+def process_message(message_dict):
+    """Process a message from RabbitMQ."""
+    try:
+        # Convert the message dictionary back to string for parsing
+        message_str = json.dumps(message_dict)
+        
+        setlos = re.search(r'SetLOS Alarm', message_str)
+        clrlos = re.search(r'ClrLOS Alarm', message_str)
+        
+        trap = extract_trap_data(message_str)
+        
+        if trap is None:
+            logger.warning(f"Could not extract trap data from message: {message_str}")
+            return
+        
+        if setlos:
+            logger.info(f"This is an outage: {message_str}")
+            set_ont_offline(trap["ont_serial"])
+        elif clrlos:
+            logger.info(f"This is an online ont: {message_str}")
+            set_ont_online(trap["ont_serial"])
+        else:
+            logger.info(f"Unknown message type: {message_str}")
+            
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+        raise
+
+
+class AsyncConsumer:
+    def __init__(self, queue_name: str = RABBITMQ_QUEUE_NAME, amqp_url: str = RABBITMQ_URL, prefetch_count: int = 10):
+        self.que_name = queue_name
+        self.amqp_url = amqp_url
+        self.prefetch_count = prefetch_count
+        self._connection = None
+        self._channel = None
+
+    async def connect(self):
+        self._connection = await aio_pika.connect_robust(RABBITMQ_URL)
+        self._channel = await self._connection.channel()
+        await self._channel.set_qos(prefetch_count=self.prefetch_count)
+
+        logger.info("Connected to RabbitMQ (onschlap)")
+
+    async def consume(self, handler: Callable[[dict], Awaitable[None]]):
+        await self.connect()
+        queue = await self._channel.declare_queue(self.que_name, durable=True, arguments={"x-queue-type": "stream"})
+
+        async def process_message_wrapper(message: IncomingMessage):
+            async with message.process():
+                try:
+                    body = json.loads(message.body.decode())
+                    await handler(body)
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}")
+                    # Reject the message to handle it later
+                    await message.reject(requeue=False)
+                else:
+                    # Acknowledge the message
+                    await message.ack()
+
+        await queue.consume(process_message_wrapper)
+        logger.info(f"Consuming {self.que_name}")
+
+        await asyncio.Future()
+
+    async def close(self):
+        if self._connection:
+            await self._connection.close()
+
+
+async def main():
+    consumer = AsyncConsumer(queue_name=str(RABBITMQ_QUEUE_NAME))
+    try:
+        await consumer.consume(process_message)
+    except KeyboardInterrupt:
+        await consumer.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
