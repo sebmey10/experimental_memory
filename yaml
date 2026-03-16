@@ -1,248 +1,148 @@
+from time import time
+from sqlalchemy import create_engine, text
 import aio_pika
 from aio_pika import IncomingMessage
 import asyncio
 import logging
-from typing import Callable, Awaitable
-import re
-import psycopg2
-from sqlalchemy import create_engine, desc, text
-import os
 import json
-from creds import db_auth 
-from creds import rabbit_auth
-from time import time
+import re
+from typing import Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 
+# --- État persistant (module-level) ---
+ont_offline_serials: set = set()          # ONTs actuellement offline
+ont_offline_times: dict = {}              # serial -> (timestamp, tap_id)
+ont_outage_counted: set = set()           # ONTs qui ont déclenché un outage_off
 
-def extract_trap_data(trap_string):
-    """
-    Extract trap data from a trap string and return as a dictionary.
-    
-    Args:
-        trap_string: The trap string to parse
-        
-    Returns:
-        dict: Dictionary containing extracted values:
-            - timestamp: Unix timestamp
-            - trap_type: Alarm type (e.g., SetLOS Alarm)
-            - olt_name: OLT hostname
-            - ont_location: ONT location in format "ONT@Shelf/Slot/Pon"
-            - ont_serial: ONT serial number
-    """
-    # Extract timestamp
-    timestamp_match = re.search(r'"clock":\s*(\d+)', trap_string)
-    timestamp = timestamp_match.group(1) if timestamp_match else None
+OUTAGE_WINDOW_SECONDS = 30
 
-    # Extract trap type (hardcoded as SetLOS Alarm)
-    trap_type = 'SetLOS Alarm'
 
-    # Extract OLT name
-    olt_name_match = re.search(r'Host:\s*([^\s]+)', trap_string)
-    olt_name = olt_name_match.group(1) if olt_name_match else None
+# --- Helpers SQL ---
 
-    # Extract ONT location components
-    interface_match = re.search(r'Interface.*?Shelf:\s*(\d+),\s*Slot:\s*(\d+),\s*Pon:\s*(\d+)', trap_string)
-    ont_match = re.search(r'ONT:\s*(\d+)', trap_string)
+def get_tap_id(conn, serial: str):
+    result = conn.execute(
+        text('SELECT tap_id FROM "ONTS" WHERE serial = :serial'),
+        {"serial": serial}
+    ).fetchone()
+    return result.tap_id if result else None
 
-    ont_location = None
-    if interface_match and ont_match:
-        ont_location = f"{ont_match.group(1)}@{interface_match.group(1)}/{interface_match.group(2)}/{interface_match.group(3)}"
 
-    # Extract ONT serial
-    ont_serial_match = re.search(r'ONT Serial No:\s*([^,]+)', trap_string)
-    ont_serial = ont_serial_match.group(1).strip() if ont_serial_match else None
-    if timestamp and olt_name and ont_location and ont_serial:
-        return {
-            'timestamp': timestamp,
-            'trap_type': trap_type,
-            'olt_name': olt_name,
-            'ont_location': ont_location,
-            'ont_serial': ont_serial
-        }
+# --- Fonctions TAP ---
 
-    return None
+def tap_total_off_increment(conn, serial: str):
+    if serial in ont_offline_serials:
+        logger.info(f"Already tracking {serial} as offline — skip increment")
+        return
 
-def set_ont_offline(serial):
-    """Set ONT status to offline in the database."""
+    tap_id = get_tap_id(conn, serial)
+    if tap_id is None:
+        logger.warning(f"No tap_id found for serial {serial}")
+        return
+
+    conn.execute(
+        text('UPDATE "TAPS" SET total_off = total_off + 1 WHERE tap_id = :tap_id'),
+        {"tap_id": tap_id}
+    )
+    ont_offline_serials.add(serial)
+    ont_offline_times[serial] = (time(), tap_id)
+    logger.info(f"Incremented total_off for tap {tap_id} (ONT {serial})")
+
+
+def tap_outage_off_increment(conn, serial: str):
+    if serial not in ont_offline_times:
+        return
+
+    offline_time, tap_id = ont_offline_times[serial]
+    now = time()
+
+    # D'autres ONTs sur le même TAP sont tombés dans la fenêtre de 30s ?
+    recent_on_same_tap = [
+        s for s, (t, tid) in ont_offline_times.items()
+        if s != serial and tid == tap_id and abs(now - t) <= OUTAGE_WINDOW_SECONDS
+    ]
+
+    if recent_on_same_tap:
+        conn.execute(
+            text('UPDATE "TAPS" SET outage_off = outage_off + 1 WHERE tap_id = :tap_id'),
+            {"tap_id": tap_id}
+        )
+        ont_outage_counted.add(serial)
+        logger.info(
+            f"Incremented outage_off for tap {tap_id} — "
+            f"{len(recent_on_same_tap) + 1} ONTs offline within {OUTAGE_WINDOW_SECONDS}s"
+        )
+
+
+def tap_total_off_decrement(conn, serial: str):
+    if serial not in ont_offline_serials:
+        logger.info(f"{serial} not in offline set — skip decrement")
+        return
+
+    tap_id = get_tap_id(conn, serial)
+    if tap_id is None:
+        logger.warning(f"No tap_id found for serial {serial}")
+        return
+
+    conn.execute(
+        text('UPDATE "TAPS" SET total_off = total_off - 1 WHERE tap_id = :tap_id'),
+        {"tap_id": tap_id}
+    )
+    ont_offline_serials.discard(serial)
+    ont_offline_times.pop(serial, None)
+    logger.info(f"Decremented total_off for tap {tap_id} (ONT {serial})")
+
+
+def tap_outage_off_decrement(conn, serial: str):
+    # Cet ONT avait-il déclenché un outage_off ?
+    if serial not in ont_outage_counted:
+        return
+
+    if serial not in ont_offline_times:
+        return
+
+    _, tap_id = ont_offline_times[serial]
+
+    conn.execute(
+        text('UPDATE "TAPS" SET outage_off = outage_off - 1 WHERE tap_id = :tap_id'),
+        {"tap_id": tap_id}
+    )
+    ont_outage_counted.discard(serial)
+    logger.info(f"Decremented outage_off for tap {tap_id} (ONT {serial})")
+
+
+# --- Fonctions principales ---
+
+def set_ont_offline(serial: str):
     try:
-        connection = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-        with connection.connect() as conn:
-            statement = text(f'UPDATE "ONTS" SET is_online = false WHERE serial = :serialnum;')
-            conn.execute(statement, {"serialnum": serial})
+        engine = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+        with engine.connect() as conn:
+            conn.execute(
+                text('UPDATE "ONTS" SET is_online = false WHERE serial = :serial'),
+                {"serial": serial}
+            )
+            tap_total_off_increment(conn, serial)
+            tap_outage_off_increment(conn, serial)
             conn.commit()
-        print(f"Changed 'is_online' to false for {serial}")
+        logger.info(f"ONT {serial} set offline")
     except Exception as e:
         logger.error(f"Error setting ONT offline: {e}")
         raise
 
-    def tap_total_off_increment(serial):
 
-        try:
-            ont_offline_serial = []
-            parent_tap = text(f'SELECT * FROM "TAPS" WHERE TAPS.tap_id = ONTS.tap_id AND ONTS.serial = {serial}')
-            command = text(f'UPDATE "TAPS" SET total_off = total_off + 1 WHERE TAPS.tap_id == ONTS.tap_id AND ONTS.serial = {serial}')
-            ont_offline_serial.append(serial)
-            if serial in ont_offline_serial:
-                pass
-            if set_ont_offline and serial not in ont_offline_serial:
-                conn.execute(command, {"serialnum": serial})
-                if conn.execute:
-                    ont_offline_serial.append(serial)
-                conn.commit()
-            print(f"Added +1 to total_off to TAP_id: {parent_tap}")
-        except Exception as e:
-            logger.error(f"Error incrementing tap {e}")
-            raise
-
-    def tap_outage_off_increment(serial):
-        time_window = 30
-        try:
-            outage_off_add = text(f'UPDATE "TAPS" SET outage_off = outage_off + 1 WHERE TAPS.tap_id == ONTS.tap_id AND ONTS.serial = {serial}')
-            total_off = text(f'SELECT "Taps.total_off" FROM "TAPS" WHERE TAPS.tap_id = ONTS.tap_id AND ONTS.serial = {serial}')
-            if total_off >=2:
-                outage_off_add(serial)
-                start = time.time(time_window)
-                end = time.time(start)
-                time_window.append(end)
-            if total_off < 2:
-                pass
-        except Exception as e:
-            logger.error(f"Error logging outage_off {e}")
-            raise
-
-
-
-
-def set_ont_online(serial):
-    """Set ONT status to online in the database."""
+def set_ont_online(serial: str):
     try:
-        connection = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-        with connection.connect() as conn:
-            statement = text(f'UPDATE "ONTS" SET is_online = true WHERE serial = :serialnum;')
-            conn.execute(statement, {"serialnum": serial})
+        engine = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+        with engine.connect() as conn:
+            conn.execute(
+                text('UPDATE "ONTS" SET is_online = true WHERE serial = :serial'),
+                {"serial": serial}
+            )
+            # Décrementer outage AVANT total — on a besoin de ont_offline_times encore intact
+            tap_outage_off_decrement(conn, serial)
+            tap_total_off_decrement(conn, serial)
             conn.commit()
-        print(f"Changed 'is_online' to true for {serial}")
+        logger.info(f"ONT {serial} set online")
     except Exception as e:
         logger.error(f"Error setting ONT online: {e}")
         raise
-
-    def tap_total_off_decrement(serial):
-        
-        try:
-            ont_offline_serial = []
-            parent_tap = text(f'SELECT * FROM "TAPS" WHERE TAPS.tap_id = ONTS.tap_id AND ONTS.serial = {serial}')
-            command = text(f'UPDATE "TAPS" SET total_off = total_off - 1 WHERE TAPS.tap_id == ONTS.tap_id AND ONTS.serial = {serial}')
-            
-            if set_ont_online and serial in ont_offline_serial:
-                conn.execute(command, {"serialnum": serial})
-                if conn.execute:
-                    ont_offline_serial.remove(serial)
-                else:
-                    pass
-                conn.commit()
-            print(f"ONT came back online with serial number: {serial}")
-
-        except Exception as e:
-            logger.error(f"Error updating {e}")
-            raise
-            
-    def tap_outage_off_decrement(serial):
-        time_window = 30
-        try:
-            outage_off_subtract = text(f'UPDATE "TAPS" SET outage_off = outage_off + 1 WHERE TAPS.tap_id == ONTS.tap_id AND ONTS.serial = {serial}')
-            total_off = text(f'SELECT "Taps.total_off" FROM "TAPS" WHERE TAPS.tap_id = ONTS.tap_id AND ONTS.serial = {serial}')
-            if total_off <=2:
-                outage_off_subtract(serial)
-                start = time.time(time_window)
-                end = time.time(start)
-                time_window.append(end)
-            if total_off > 2:
-                pass
-        except Exception as e:
-            logger.error(f"Error logging outage_off {e}")
-            raise
-
-
-
-def process_message(message_dict):
-    """Process a message from RabbitMQ."""
-    try:
-        # Convert the message dictionary back to string for parsing
-        message_str = json.dumps(message_dict)
-        
-        setlos = re.search(r'SetLOS Alarm', message_str)
-        clrlos = re.search(r'ClrLOS Alarm', message_str)
-        
-        trap = extract_trap_data(message_str)
-        
-        if trap is None:
-            logger.warning(f"Could not extract trap data from message: {message_str}")
-            return
-        
-        if setlos:
-            logger.info(f"This is an outage: {message_str}")
-            set_ont_offline(trap["ont_serial"])
-        elif clrlos:
-            logger.info(f"This is an online ont: {message_str}")
-            set_ont_online(trap["ont_serial"])
-        else:
-            logger.info(f"Unknown message type: {message_str}")
-            
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        raise
-
-
-class AsyncConsumer:
-    def __init__(self, queue_name: str = RABBITMQ_QUEUE_NAME, amqp_url: str = RABBITMQ_URL, prefetch_count: int = 10):
-        self.que_name = queue_name
-        self.amqp_url = amqp_url
-        self.prefetch_count = prefetch_count
-        self._connection = None
-        self._channel = None
-
-    async def connect(self):
-        self._connection = await aio_pika.connect_robust(RABBITMQ_URL)
-        self._channel = await self._connection.channel()
-        await self._channel.set_qos(prefetch_count=self.prefetch_count)
-
-        logger.info("Connected to RabbitMQ (onschlap)")
-
-    async def consume(self, handler: Callable[[dict], Awaitable[None]]):
-        await self.connect()
-        queue = await self._channel.declare_queue(self.que_name, durable=True, arguments={"x-queue-type": "stream"})
-
-        async def process_message_wrapper(message: IncomingMessage):
-            async with message.process():
-                try:
-                    body = json.loads(message.body.decode())
-                    await handler(body)
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    # Reject the message to handle it later
-                    await message.reject(requeue=False)
-                else:
-                    # Acknowledge the message
-                    await message.ack()
-
-        await queue.consume(process_message_wrapper)
-        logger.info(f"Consuming {self.que_name}")
-
-        await asyncio.Future()
-
-    async def close(self):
-        if self._connection:
-            await self._connection.close()
-
-
-async def main():
-    consumer = AsyncConsumer(queue_name=str(RABBITMQ_QUEUE_NAME))
-    try:
-        await consumer.consume(process_message)
-    except KeyboardInterrupt:
-        await consumer.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
